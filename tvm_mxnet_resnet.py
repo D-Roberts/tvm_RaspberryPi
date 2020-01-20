@@ -44,7 +44,7 @@ def main():
     synset_path = download_testdata(synset_url, synset_name, module='data')
     with open(synset_path) as f:
         synset = eval(f.read())
-    print(synset)
+    # print(synset)
 
     # Port GLuon model to portable computational graph
     batch_size = 1
@@ -58,6 +58,56 @@ def main():
     func = mod["main"]
     func = relay.Function(func.params, relay.nn.softmax(func.body), None, func.type_params, func.attrs)
 
+    # compile the graph to run on RaspPi modelB
+    local_demo = False
+
+    if local_demo:
+        target = tvm.target.create('llvm')
+    else:
+        target = tvm.target.arm_cpu('rasp3b')
+
+    with relay.build_config(opt_level=3):
+        graph, lib, params = relay.build(func, target, params=params)
+
+    # Save the library at local temporary directory.
+    tmp = util.tempdir()
+    lib_fname = tmp.relpath('net.tar')
+    lib.export_library(lib_fname)
+
+    # RPC server is running on the Rasp Pi.
+    # Get the IP address of the Rasp Pi and connect to the machine to run the net compiled here with Relay.
+
+    # obtain an RPC session from remote device.
+    if local_demo:
+        remote = rpc.LocalSession()
+    else:
+        # The following is my environment, change this to the IP address of your target device
+        host = '192.168.0.10'
+        port = 9090
+        remote = rpc.connect(host, port)
+
+    # upload the library to remote device and load it
+    remote.upload(lib_fname)
+    rlib = remote.load_module('net.tar')
+
+    # create the remote runtime module
+    ctx = remote.cpu(0)
+    module = runtime.create(graph, rlib, ctx)
+    # set parameter (upload params to the remote device. This may take a while)
+    module.set_input(**params)
+    # set input data
+    module.set_input('data', tvm.nd.array(x.astype('float32')))
+    # run
+    module.run()
+    # get output
+    out = module.get_output(0)
+    # get top1 result
+    top1 = np.argmax(out.asnumpy())
+    print('TVM prediction top-1: {}'.format(synset[top1]))
+    # ran on Raspberry Pi, messages in terminal on Raspberry PI:
+    # INFO:RPCServer: connection from (machost, port)
+    # INFO:RPCServer: load_module /tmp/tmp5sdcfiaw/net.tar
+    # INFO: RPCServer:Finish serving (machost, port)
 
 if __name__ == "__main__":
     main()
